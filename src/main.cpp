@@ -17,6 +17,38 @@ constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
 
+// https://www.cs.mtu.edu/~shene/COURSES/cs3621/NOTES/geometry/geo-tran.html
+double mapToCarX(double x, double y, double h, double k, double theta) {
+  return cos(theta)*x + sin(theta)*y + (-h*cos(theta) - k*sin(theta));
+};
+
+// https://www.cs.mtu.edu/~shene/COURSES/cs3621/NOTES/geometry/geo-tran.html
+double mapToCarY(double x, double y, double h, double k, double theta) {
+  return -sin(theta)*x + cos(theta)*y + (h*sin(theta) - k*cos(theta));
+};
+
+// NOTE: state is [x, y, psi, v]
+// NOTE: actuators is [delta, a]
+Eigen::VectorXd globalKinematic(Eigen::VectorXd state, double delta, double a,
+                                double dt) {
+  Eigen::VectorXd next_state(state.size());
+
+  Eigen::VectorXd change(state.size());
+
+  const double Lf = 2.67;
+  double v = state(3);
+  double psi = state(2);
+
+  change << v * cos(psi) * dt,
+            v * sin(psi) * dt,
+            (v/Lf) * delta * dt,
+            a * dt;
+
+  next_state = state + change;
+
+  return next_state;
+}
+
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
 // else the empty string "" will be returned.
@@ -85,12 +117,12 @@ int main() {
         string event = j[0].get<string>();
         if (event == "telemetry") {
           // j[1] is the data JSON object
-          vector<double> ptsx = j[1]["ptsx"];
-          vector<double> ptsy = j[1]["ptsy"];
-          double px = j[1]["x"];
-          double py = j[1]["y"];
-          double psi = j[1]["psi"];
-          double v = j[1]["speed"];
+          vector<double> ptsx = j[1]["ptsx"]; // The global x positions of the waypoints
+          vector<double> ptsy = j[1]["ptsy"]; // The global y positions of the waypoints
+          double px = j[1]["x"]; // The global x position of the vehicle
+          double py = j[1]["y"]; // The global y position of the vehicle
+          double psi = j[1]["psi"]; // The orientation of the vehicle in radians
+          double v = j[1]["speed"]; // The current velocity in mph
 
           /*
           * TODO: Calculate steeering angle and throttle using MPC.
@@ -101,28 +133,97 @@ int main() {
           double steer_value;
           double throttle_value;
 
+          steer_value = j[1]["steering_angle"];
+          throttle_value = j[1]["throttle"];
+
+          // Coordinates Transformation
+          // ==========================
+          // https://www.cs.mtu.edu/~shene/COURSES/cs3621/NOTES/geometry/geo-tran.html
+
+          // Waypoints in vehicle coordinates
+          Eigen::VectorXd x_car_ref(ptsx.size());
+          Eigen::VectorXd y_car_ref(ptsy.size());
+
+          for (int i = 0; i < ptsx.size(); ++i) {
+            x_car_ref(i) = mapToCarX(ptsx[i], ptsy[i], px, py, psi);
+            y_car_ref(i) = mapToCarY(ptsx[i], ptsy[i], px, py, psi);
+          }
+
+          // Fit Polynomial
+          // ==============
+
+          auto coeffs = polyfit(x_car_ref, y_car_ref, 3);
+
+          // Update State and Actuators
+          // ==========================
+
+          // New state after 100ms in vehicle coordinates
+          const double Lf = 2.67;
+          const double dt = 0.1;
+          double delta = -steer_value;
+          double xf = v * dt;
+          double yf = 0;
+          double psif = (v/Lf) * delta * dt;
+          double vf = v;
+
+          // Errors
+          double cte = polyeval(coeffs, xf);
+          double epsi = -atan(coeffs[1] + 2 * coeffs[2] * xf);
+
+          Eigen::VectorXd state(6);
+          state << xf, yf, psif, vf, cte, epsi;
+
+          // Solve Optimization
+          // ==================
+
+          auto vars = mpc.Solve(state, coeffs);
+
+          auto x_val = vars[0];
+          auto y_val = vars[1];
+          auto psi_val = vars[2];
+          auto v_val = vars[3];
+          auto cte_val = vars[4];
+          auto epsi_val = vars[5];
+          auto delta_val = vars[6];
+          auto a_val = vars[7];
+
+          steer_value = -delta_val/deg2rad(25);
+          throttle_value = a_val;
+
           json msgJson;
           // NOTE: Remember to divide by deg2rad(25) before you send the steering value back.
           // Otherwise the values will be in between [-deg2rad(25), deg2rad(25] instead of [-1, 1].
           msgJson["steering_angle"] = steer_value;
           msgJson["throttle"] = throttle_value;
 
-          //Display the MPC predicted trajectory 
+          // Display the MPC predicted trajectory
+          // ====================================
           vector<double> mpc_x_vals;
           vector<double> mpc_y_vals;
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Green line
 
+          for (int i = 0; i < 4; ++i) {
+            mpc_x_vals.push_back(x_val + i);
+            mpc_y_vals.push_back(y_val + i);
+          }
+
           msgJson["mpc_x"] = mpc_x_vals;
           msgJson["mpc_y"] = mpc_y_vals;
 
-          //Display the waypoints/reference line
+          // Display the waypoints/reference line
+          // ====================================
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
           //.. add (x,y) points to list here, points are in reference to the vehicle's coordinate system
           // the points in the simulator are connected by a Yellow line
+
+          for (int i = 0; i < ptsx.size(); ++i) {
+            next_x_vals.push_back(x_car_ref(i));
+            next_y_vals.push_back(y_car_ref(i));
+          }
 
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
@@ -130,6 +231,7 @@ int main() {
 
           auto msg = "42[\"steer\"," + msgJson.dump() + "]";
           std::cout << msg << std::endl;
+
           // Latency
           // The purpose is to mimic real driving conditions where
           // the car does actuate the commands instantly.
