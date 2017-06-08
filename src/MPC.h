@@ -8,15 +8,24 @@
 
 using namespace std;
 
+struct Point {
+  double x;
+  double y;
+};
+
 class MPC {
- public:
+public:
   MPC();
 
   virtual ~MPC();
 
   // Solve the model given an initial state and polynomial coefficients.
   // Return the first actuatotions.
-  vector<double> Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs);
+  bool Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs);
+
+  double first_delta;
+  double first_a;
+  vector<Point> predicted_points;
 };
 
 #endif /* MPC_H */
