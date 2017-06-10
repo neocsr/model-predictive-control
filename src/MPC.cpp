@@ -6,9 +6,12 @@
 using CppAD::AD;
 
 // TODO: Set the timestep length and duration
-size_t N = 20;
-double dt = 0.05;
-//double dt = 0.05;
+
+// N was chosen to account 1 second as prediction horizon with steps of 100ms
+size_t N = 10;
+
+// The time step of each set of constraints set for 100ms
+double dt = 0.1;
 
 // This value assumes the model presented in the classroom is used.
 //
@@ -24,7 +27,22 @@ const double Lf = 2.67;
 
 double ref_cte = 0;
 double ref_epsi = 0;
-double ref_v = 40;
+double ref_v = 110;
+
+// Weights
+// =======
+
+// Very important to constrain errors
+const int w_cte = 2500;
+const int w_epsi = 2500;
+
+// Not important to constrain actuators
+const int w_delta = 1;
+const int w_a = 1;
+
+// Important to minimize the gap between sequential actuators to reduce jerk
+const int w_delta_diff = 200;
+const int w_a_diff = 10;
 
 size_t x_idx = 0;
 size_t y_idx = x_idx + N;
@@ -53,21 +71,21 @@ class FG_eval {
 
     // Cost based on the reference state
     for (int i = 0; i < N; i++) {
-      fg[0] += CppAD::pow(vars[cte_idx + i] - ref_cte, 2);
-      fg[0] += CppAD::pow(vars[epsi_idx + i] - ref_epsi, 2);
+      fg[0] += w_cte * CppAD::pow(vars[cte_idx + i] - ref_cte, 2);
+      fg[0] += w_epsi * CppAD::pow(vars[epsi_idx + i] - ref_epsi, 2);
       fg[0] += CppAD::pow(vars[v_idx + i] - ref_v, 2);
     }
 
     // Minimize the use of actuators.
     for (int i = 0; i < N - 1; i++) {
-      fg[0] += CppAD::pow(vars[delta_idx + i], 2);
-      fg[0] += CppAD::pow(vars[a_idx + i], 2);
+      fg[0] += w_delta * CppAD::pow(vars[delta_idx + i], 2);
+      fg[0] += w_a * CppAD::pow(vars[a_idx + i], 2);
     }
 
     // Minimize the value gap between sequential actuations.
     for (int i = 0; i < N - 2; i++) {
-      fg[0] += CppAD::pow(vars[delta_idx + i + 1] - vars[delta_idx + i], 2);
-      fg[0] += CppAD::pow(vars[a_idx + i + 1] - vars[a_idx + i], 2);
+      fg[0] += w_delta_diff * CppAD::pow(vars[delta_idx + i + 1] - vars[delta_idx + i], 2);
+      fg[0] += w_a_diff * CppAD::pow(vars[a_idx + i + 1] - vars[a_idx + i], 2);
     }
 
     // Initial constraints
@@ -105,10 +123,15 @@ class FG_eval {
       AD<double> a0 = vars[a_idx + i];
 
       // f(x)
-      AD<double> f0 = coeffs[0] + coeffs[1] * x0 + coeffs[2] * x0 * x0;
+      AD<double> f0 = coeffs[0] +
+                      coeffs[1] * x0 +
+                      coeffs[2] * x0 * x0 +
+                      coeffs[3] * x0 * x0 * x0;
 
       // f'(x)
-      AD<double> psides0 = CppAD::atan(coeffs[1] + 2 * coeffs[2] * x0);
+      AD<double> psides0 = CppAD::atan(coeffs[1] +
+                                       2 * coeffs[2] * x0 +
+                                       3 * coeffs[3] * x0 * x0);
 
       // Here's `x` to get you started.
       // The idea here is to constraint this value to be 0.
@@ -181,15 +204,15 @@ bool MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   // degrees (values in radians).
   // NOTE: Feel free to change this to something else.
   for (int i = delta_idx; i < a_idx; i++) {
-    vars_lowerbound[i] = -0.436332;
-    vars_upperbound[i] = 0.436332;
+    vars_lowerbound[i] = -0.436332 * Lf;
+    vars_upperbound[i] = 0.436332 * Lf;
   }
 
   // Acceleration/decceleration upper and lower limits.
   // NOTE: Feel free to change this to something else.
   for (int i = a_idx; i < n_vars; i++) {
-    vars_lowerbound[i] = -0.4;
-    vars_upperbound[i] = 0.4;
+    vars_lowerbound[i] = -0.7;
+    vars_upperbound[i] = 0.7;
   }
 
   // Lower and upper limits for the constraints
@@ -273,9 +296,4 @@ bool MPC::Solve(Eigen::VectorXd state, Eigen::VectorXd coeffs) {
   }
 
   return ok;
-  
-//  return {solution.x[x_idx + 1],   solution.x[y_idx + 1],
-//          solution.x[psi_idx + 1], solution.x[v_idx + 1],
-//          solution.x[cte_idx + 1], solution.x[epsi_idx + 1],
-//          solution.x[delta_idx],   solution.x[a_idx]};
 }
